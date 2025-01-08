@@ -1,6 +1,7 @@
 import torch
 from transformers import CLIPTextModel, CLIPTokenizer
 from diffusers import AutoencoderKL, UNet2DConditionModel, PNDMScheduler
+from tqdm.auto import tqdm
 
 vae = AutoencoderKL.from_pretrained(
         "CompVis/stable-diffusion-v1-4",
@@ -32,7 +33,7 @@ scheduler = UniPCMultistepScheduler.from_pretrained(
         subfolder="scheduler"
         )
 
-torch_device = "cuda"
+torch_device = "cpu" # "cuda"
 vae.to(torch_device)
 text_encoder.to(torch_device)
 unet.to(torch_device)
@@ -68,3 +69,32 @@ with torch.no_grad():
     text_embeddings = text_encoder(text_input.input_ids.to(torch_device))[0]
 
 print(text_embeddings)
+
+latents = torch.randn(
+        (batch_size, unet.config.in_channels, height // 8, width // 8),
+        generator=generator,
+        device=torch_device,
+        )
+latents = latents * scheduler.init_noise_sigma
+
+
+scheduler.set_timesteps(num_inference_steps)
+
+
+for t in tqdm(scheduler.timesteps):
+    # expand the latents if we are doing classifier-free guidance to avoid doing two forward passes.
+    latent_model_input = torch.cat([latents] * 2)
+
+    latent_model_input = scheduler.scale_model_input(latent_model_input, timestep=t)
+
+    # predict the noise residual
+    with torch.no_grad():
+        noise_pred = unet(latent_model_input, t, encoder_hidden_states=text_embeddings).sample
+
+    breakpoint()
+    # perform guidance
+    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+    # compute the previous noisy sample x_t -> x_t-1
+    latents = scheduler.step(noise_pred, t, latents).prev_sample

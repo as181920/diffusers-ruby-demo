@@ -3,6 +3,7 @@ git_source(:github) { |repo| "https://github.com/#{repo}.git" }
 
 ruby "3.2.3"
 
+gem "chunky_png"
 gem "debug"
 gem "onnxruntime"
 gem "rubocop"
