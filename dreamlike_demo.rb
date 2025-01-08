@@ -31,7 +31,7 @@ text_ids = Torch.tensor(text_tokens.map(&:ids))
 pp text_ids
 
 # Create text embeddings
-text_encoder = OnnxRuntime::Model.new("../onnx/text_encoder/model.onnx", providers:) # name: openai/clip-vit-large-patch14
+text_encoder = OnnxRuntime::Model.new("./onnx/text_encoder/model.onnx", providers:) # name: openai/clip-vit-large-patch14
 text_embeddings = Torch.no_grad do
   text_encoder
     .predict({ input_ids: text_ids }) # Shape: 1x77
@@ -51,12 +51,12 @@ text_embeddings = Torch.cat([uncond_embeddings, text_embeddings])
 # Create random noise
 height = 512
 width = 512
-unet = OnnxRuntime::Model.new("../onnx/unet/model.onnx", providers:)
+unet = OnnxRuntime::Model.new("./onnx/unet/model.onnx", providers:)
 channels_num = unet.inputs.detect{ |e| e[:name] == "sample" }[:shape][1]
 generator = Torch::Generator.new.manual_seed(0) # Seed generator to create the initial latent noise
 latents = Torch.randn([batch_size, channels_num, height / 8, width / 8], generator:, device:) # Shape: 1x4x64x64
 
-# vae_encoder = OnnxRuntime::Model.new("../onnx/vae_encoder/model.onnx", providers:)
+# vae_encoder = OnnxRuntime::Model.new("./onnx/vae_encoder/model.onnx", providers:)
 # vae_decoder = OnnxRuntime::Model.new("./onnx/vae_decoder/model.onnx", providers:)
 #
 
