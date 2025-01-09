@@ -70,6 +70,7 @@ with torch.no_grad():
 
 print(text_embeddings)
 
+torch.manual_seed(42)
 latents = torch.randn(
         (batch_size, unet.config.in_channels, height // 8, width // 8),
         generator=generator,

@@ -4,6 +4,7 @@ require "onnxruntime"
 require "tokenizers"
 require "debug"
 require_relative "./ddim_scheduler"
+require_relative "./pndm_scheduler"
 
 # Set onnxruntime device
 if Torch::CUDA.available? && ENV.fetch("DEVICE", "cpu").eql?("cuda")
@@ -58,8 +59,11 @@ width = 512
 unet = OnnxRuntime::Model.new("./onnx/unet/model.onnx", providers: PROVIDERS)
 channels_num = unet.inputs.detect{ |e| e[:name] == "sample" }[:shape][1]
 generator = Torch::Generator.new.manual_seed(0) # Seed generator to create the initial latent noise
+Torch.manual_seed(42)
 latents = Torch.randn([batch_size, channels_num, height / 8, width / 8], generator:, device: DEVICE) # Shape: 1x4x64x64
-# Set scheduler scheduler = DDIMScheduler.new(steps_offset: 1, timestep_spacing: "leading")
+# Set scheduler
+# scheduler = DDIMScheduler.new(steps_offset: 1, timestep_spacing: "leading")
+scheduler = PNDMScheduler.new(steps_offset: 1, timestep_spacing: "leading")
 latents = latents * scheduler.init_noise_sigma # Scaling the input with the initial noise distribution, sigma
 num_inference_steps = 25 # denoising steps
 scheduler.num_inference_steps = num_inference_steps

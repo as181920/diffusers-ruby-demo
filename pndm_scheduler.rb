@@ -1,15 +1,11 @@
 require "torch-rb"
 
-# Example:
-# scheduler = DDIMScheduler.new
-# puts "Alphas: #{scheduler.alphas[0..9]}" # Prints the first 10 alphas
-# puts "Timesteps: #{scheduler.timesteps[0..9]}" # Prints the first 10 timesteps
-
-class DDIMScheduler
-  attr_reader :beta_schedule, :beta_start, :beta_end,
-    :betas, :alphas, :alphas_cumprod,
+class PNDMScheduler
+  attr_reader :beta_schedule, :beta_start, :beta_end, :betas,
+    :alphas, :alphas_cumprod,
     :num_train_timesteps, :timestep_spacing,
-    :prediction_type, :clip_sample, :set_alpha_to_one,
+    :prediction_type,
+    :clip_sample, :set_alpha_to_one,
     :skip_prk_steps, :steps_offset, :trained_betas,
     :init_noise_sigma
 
@@ -29,9 +25,10 @@ class DDIMScheduler
     steps_offset: 0,
     trained_betas: nil
   )
+    # 从配置初始化参数
+    @beta_schedule = beta_schedule
     @beta_start = beta_start
     @beta_end = beta_end
-    @beta_schedule = beta_schedule
     @num_train_timesteps = num_train_timesteps
     @num_inference_steps = num_inference_steps
     @timestep_spacing = timestep_spacing
@@ -43,8 +40,9 @@ class DDIMScheduler
     @trained_betas = trained_betas
     @init_noise_sigma = 1.0
 
+    # 初始化 betas 和 alphas_cumprod
     initialize_betas_and_alphas
-    initialize_alphas_cumprod
+    compute_alphas_cumprod
   end
 
   def timesteps
@@ -60,39 +58,39 @@ class DDIMScheduler
     input
   end
 
-  def step(model_output, timestep, sample, eta: 0.0)
-    # 获取当前时间步的参数
-    alpha_t = alphas_cumprod[timestep]
-    alpha_t_prev = timestep > 0 ? alphas_cumprod[timestep - 1] : Torch.tensor(1.0)
+  def step(model_output, timestep, sample)
+    # 当前 alpha_cumprod 和 beta_t
+    alpha_cumprod_t = alphas_cumprod[timestep]
+    alpha_cumprod_prev = timestep > 0 ? alphas_cumprod[timestep - 1] : Torch.tensor(1.0)
+    # beta_t = betas[timestep]
 
-    beta_t = Torch.tensor(1.0) - alpha_t
-    sigma_t = Torch.tensor(eta) * Torch.sqrt(beta_t) # DDIM 的噪声项
-
-    # 计算去噪后的样本 x_0
-    pred_original_sample = (sample - Torch.sqrt(beta_t) * model_output) / Torch.sqrt(alpha_t)
-
-    # 计算下一个时间步的样本
-    pred_sample_direction = Torch.sqrt(Torch.tensor(1.0) - alpha_t_prev - sigma_t ** 2) * model_output
-    x_prev = Torch.sqrt(alpha_t_prev) * pred_original_sample + pred_sample_direction
-
-    # 如果 eta > 0，加入随机噪声
-    if eta > 0.0
-      noise = Torch.randn(sample.size) # Shape: 1x4x64x64
-      x_prev += Torch.tensor(eta) * Torch.sqrt(Torch.tensor(1.0) - alpha_t_prev) * noise
+    # 根据 prediction_type 计算 x_0
+    case prediction_type
+    when "epsilon"
+      pred_original_sample = (sample - Torch.sqrt(Torch.tensor(1.0) - alpha_cumprod_t) * model_output) / Torch.sqrt(alpha_cumprod_t)
+    else
+      raise NotImplementedError, "Prediction type #{prediction_type} not implemented."
     end
 
-    { prev_sample: x_prev }
+    # Clip x_0 if clip_sample is true
+    pred_original_sample = pred_original_sample.map { |v| v.clamp(-1.0, 1.0) } if clip_sample
+
+    # 计算下一个时间步的样本
+    sample_predicted = Torch.sqrt(alpha_cumprod_prev) * pred_original_sample +
+      Torch.sqrt(Torch.tensor(1.0) - alpha_cumprod_prev) * model_output
+
+    { prev_sample: sample_predicted }
   end
 
   private
 
     def initialize_betas_and_alphas
       if @trained_betas.nil?
-        case @beta_schedule
+        case beta_schedule
         when "scaled_linear"
-          @betas = scaled_linear_beta_schedule(@beta_start, @beta_end, @num_train_timesteps)
+          @betas = Torch.linspace(beta_start**0.5, beta_end**0.5, num_train_timesteps) ** 2
         else
-          raise "Unsupported beta_schedule: #{@beta_schedule}"
+          raise NotImplementedError, "Beta schedule #{beta_schedule} not implemented."
         end
       else
         @betas = @trained_betas
@@ -102,13 +100,7 @@ class DDIMScheduler
         .tap { |a| a[-1] = Torch.tensor(1.0) if set_alpha_to_one }
     end
 
-    def scaled_linear_beta_schedule(beta_start, beta_end, num_train_timesteps)
-      (0...num_train_timesteps).map do |t|
-        beta_start + t * (beta_end - beta_start) / (num_train_timesteps - 1)
-      end
-    end
-
-    def initialize_alphas_cumprod
+    def compute_alphas_cumprod
       @alphas_cumprod = Torch.cumprod(alphas, dim: 0)
     end
 
@@ -128,13 +120,5 @@ class DDIMScheduler
         .then { |t| t + steps_offset.to_i }
         .clip(0, num_train_timesteps.pred)
         .map(&:to_i)
-    end
-
-    def native_linspace_timesteps
-      (0...num_inference_steps)
-        .to_a
-        .tap { |ts| ts.shift(@steps_offset) if @steps_offset > 0 }
-        .map { |t| ((num_train_timesteps - 1).to_f / (num_inference_steps - 1) * t).round }
-        .reverse
     end
 end
