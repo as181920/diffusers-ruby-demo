@@ -59,16 +59,19 @@ class DDIMScheduler
     input
   end
 
-  def step(model_output, timestep, sample, eta = 0.0)
+  def step(model_output, timestep, sample, eta: 0.0)
     # 获取当前时间步的参数
     alpha_t = alphas_cumprod[timestep]
-    alpha_t_prev = timestep > 0 ? alphas_cumprod[timestep - 1] : Torch.tensor(0.0)
+    alpha_t_prev = timestep > 0 ? alphas_cumprod[timestep - 1] : Torch.tensor(1.0)
+
+    beta_t = Torch.tensor(1.0) - alpha_t
+    sigma_t = Torch.tensor(eta) * Torch.sqrt(beta_t) # DDIM 的噪声项
 
     # 计算去噪后的样本 x_0
-    pred_original_sample = (sample - Torch.sqrt(Torch.tensor(1.0) - alpha_t) * model_output) / Torch.sqrt(alpha_t)
+    pred_original_sample = (sample - Torch.sqrt(beta_t) * model_output) / Torch.sqrt(alpha_t)
 
     # 计算下一个时间步的样本
-    pred_sample_direction = Torch.sqrt(Torch.tensor(1.0) - alpha_t_prev) * model_output
+    pred_sample_direction = Torch.sqrt(Torch.tensor(1.0) - alpha_t_prev - sigma_t ** 2) * model_output
     x_prev = Torch.sqrt(alpha_t_prev) * pred_original_sample + pred_sample_direction
 
     # 如果 eta > 0，加入随机噪声
