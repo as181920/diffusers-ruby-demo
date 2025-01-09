@@ -9,7 +9,7 @@ class PNDMScheduler
     :skip_prk_steps, :steps_offset, :trained_betas,
     :init_noise_sigma
 
-  attr_accessor :num_inference_steps
+  attr_accessor :num_inference_steps, :ets, :counter
 
   def initialize(
     beta_schedule: "scaled_linear",
@@ -23,7 +23,8 @@ class PNDMScheduler
     set_alpha_to_one: false,
     skip_prk_steps: true,
     steps_offset: 0,
-    trained_betas: nil
+    trained_betas: nil,
+    ets: []
   )
     # 从配置初始化参数
     @beta_schedule = beta_schedule
@@ -39,6 +40,8 @@ class PNDMScheduler
     @steps_offset = steps_offset
     @trained_betas = trained_betas
     @init_noise_sigma = 1.0
+    @ets = ets
+    @counter = 0
 
     # 初始化 betas 和 alphas_cumprod
     initialize_betas_and_alphas
@@ -59,6 +62,43 @@ class PNDMScheduler
   end
 
   def step(model_output, timestep, sample)
+    if ets.size < 4
+      step_prk(model_output, timestep, sample)
+    else
+      step_plms(model_output, timestep, sample)
+    end
+  end
+
+  def step_prk(model_output, timestep, sample)
+    @ets << model_output
+    alpha_t = Math.cos(timestep * Math::PI / 2)
+    beta_t = 1 - alpha_t
+
+    updated_sample = sample - (Torch.tensor(beta_t) * model_output)
+
+    if @ets.size == 4 # Once 4 ets are gathered, use PLMS directly in the next step
+      @counter += 1
+      @ets.shift
+    end
+
+    { prev_sample: updated_sample }
+  end
+
+  def step_plms(model_output, timestep, sample)
+    @ets << model_output
+    @ets.shift if @ets.size > 4
+
+    a, b, c, d = [0.5, -1.0, 1.5, -0.5].map { |f| Torch.tensor(f) } # Coefficients for PLMS
+    combined_eta = (a * @ets[-4]) + (b * @ets[-3]) + (c * @ets[-2]) + (d * @ets[-1])
+
+    alpha_t = Math.cos(timestep * Math::PI / 2)
+    beta_t = 1 - alpha_t
+
+    updated_sample = sample - (Torch.tensor(beta_t) * combined_eta)
+    { prev_sample: updated_sample }
+  end
+
+  def step_deprecated(model_output, timestep, sample)
     # 当前 alpha_cumprod 和 beta_t
     alpha_cumprod_t = alphas_cumprod[timestep]
     alpha_cumprod_prev = timestep > 0 ? alphas_cumprod[timestep - 1] : Torch.tensor(1.0)
@@ -120,5 +160,10 @@ class PNDMScheduler
         .then { |t| t + steps_offset.to_i }
         .clip(0, num_train_timesteps.pred)
         .map(&:to_i)
+    end
+
+    def _add_noise(original_sample, noise, timestep)
+      alpha_t = Math.cos(timestep * Math::PI / 2)
+      (alpha_t * original_sample) + ((1 - alpha_t) * noise)
     end
 end
