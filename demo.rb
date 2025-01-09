@@ -88,7 +88,7 @@ end
 # scale and decode the image latents with vae
 # vae_encoder = OnnxRuntime::Model.new("./onnx/vae_encoder/model.onnx", providers:)
 vae_decoder = OnnxRuntime::Model.new("./onnx/vae_decoder/model.onnx", providers:)
-latents = 1 / 0.18215 * latents
+latents = latents / 0.18215
 image = Torch.no_grad do
   vae_decoder
     .predict({latent_sample: latents})
@@ -105,7 +105,7 @@ image = image[0] if image.ndim == 4
 # Step 3: 调整维度顺序，从 (C, H, W) 到 (H, W, C)
 image = image.permute(1, 2, 0)
 # Step 4: 转换到 uint8 并放大到 [0, 255]
-image = (image * 255).round
+image = (image * 255).round.to(Torch.uint8)
 # Step 5: 将数组转换为 PNG 图像并保存
 output_height, output_width, _channels = image.shape
 png = ChunkyPNG::Image.new(output_width, output_height)
