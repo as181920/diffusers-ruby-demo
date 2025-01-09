@@ -5,8 +5,15 @@ require "tokenizers"
 require "debug"
 require_relative "./ddim_scheduler"
 
-device = Torch::CUDA.available? ? ENV.fetch("DEVICE", "cuda") : "cpu"
-providers = device == "cuda" ? %w[CUDAExecutionProvider] : %w[CPUExecutionProvider]
+# Set onnxruntime device
+if Torch::CUDA.available? && ENV.fetch("DEVICE", "cpu").eql?("cuda")
+  OnnxRuntime.ffi_lib = ENV.fetch("ONNX_lib", OnnxRuntime.ffi_lib)
+  DEVICE = "cuda".freeze
+  PROVIDERS = %w[CUDAExecutionProvider].freeze
+else
+  DEVICE = "cpu".freeze
+  PROVIDERS = %w[CPUExecutionProvider].freeze
+end
 
 # model:
 # https://huggingface.co/docs/diffusers/tutorials/autopipeline
@@ -27,7 +34,7 @@ text_ids = Torch.tensor(text_tokens.map(&:ids))
 print "text_tokens(#{text_ids.shape}):\n", text_ids, "\n"
 
 # Create text embeddings
-text_encoder = OnnxRuntime::Model.new("./onnx/text_encoder/model.onnx", providers:) # name: openai/clip-vit-large-patch14
+text_encoder = OnnxRuntime::Model.new("./onnx/text_encoder/model.onnx", providers: PROVIDERS) # name: openai/clip-vit-large-patch14
 text_embeddings = Torch.no_grad do
   text_encoder
     .predict({ input_ids: text_ids }) # Shape: 1x77
@@ -48,13 +55,11 @@ text_embeddings = Torch.cat([uncond_embeddings, text_embeddings])
 # Create random noise
 height = 512
 width = 512
-unet = OnnxRuntime::Model.new("./onnx/unet/model.onnx", providers:)
+unet = OnnxRuntime::Model.new("./onnx/unet/model.onnx", providers: PROVIDERS)
 channels_num = unet.inputs.detect{ |e| e[:name] == "sample" }[:shape][1]
 generator = Torch::Generator.new.manual_seed(0) # Seed generator to create the initial latent noise
-latents = Torch.randn([batch_size, channels_num, height / 8, width / 8], generator:, device:) # Shape: 1x4x64x64
-
-# Set scheduler
-scheduler = DDIMScheduler.new(steps_offset: 1, timestep_spacing: "leading")
+latents = Torch.randn([batch_size, channels_num, height / 8, width / 8], generator:, device: DEVICE) # Shape: 1x4x64x64
+# Set scheduler scheduler = DDIMScheduler.new(steps_offset: 1, timestep_spacing: "leading")
 latents = latents * scheduler.init_noise_sigma # Scaling the input with the initial noise distribution, sigma
 num_inference_steps = 25 # denoising steps
 scheduler.num_inference_steps = num_inference_steps
@@ -86,8 +91,8 @@ end
 # Decode the image
 
 # scale and decode the image latents with vae
-# vae_encoder = OnnxRuntime::Model.new("./onnx/vae_encoder/model.onnx", providers:)
-vae_decoder = OnnxRuntime::Model.new("./onnx/vae_decoder/model.onnx", providers:)
+# vae_encoder = OnnxRuntime::Model.new("./onnx/vae_encoder/model.onnx", providers: PROVIDERS)
+vae_decoder = OnnxRuntime::Model.new("./onnx/vae_decoder/model.onnx", providers: PROVIDERS)
 latents = latents / 0.18215
 image = Torch.no_grad do
   vae_decoder
