@@ -7,7 +7,7 @@ require "torch-rb"
 
 class DDIMScheduler
   attr_reader :beta_schedule, :beta_start, :beta_end,
-    :num_train_timesteps,
+    :num_train_timesteps, :timestep_spacing,
     :prediction_type, :clip_sample, :set_alpha_to_one,
     :skip_prk_steps, :steps_offset, :trained_betas, :alphas, :alphas_cumprod,
     :init_noise_sigma
@@ -20,6 +20,7 @@ class DDIMScheduler
     beta_end: 0.012,
     num_train_timesteps: 1000,
     num_inference_steps: 25,
+    timestep_spacing: "leading",
     prediction_type: "epsilon",
     clip_sample: false,
     set_alpha_to_one: false,
@@ -32,6 +33,7 @@ class DDIMScheduler
     @beta_schedule = beta_schedule
     @num_train_timesteps = num_train_timesteps
     @num_inference_steps = num_inference_steps
+    @timestep_spacing = timestep_spacing
     @prediction_type = prediction_type
     @clip_sample = clip_sample
     @set_alpha_to_one = set_alpha_to_one
@@ -45,18 +47,12 @@ class DDIMScheduler
   end
 
   def timesteps
-    Torch.linspace(0, (num_train_timesteps - @steps_offset.to_i).pred, num_inference_steps)
-      .round
-      .flip(dims: [0])
-      .map(&:to_i)
-  end
-
-  def native_timesteps
-    (0...num_inference_steps)
-      .to_a
-      .tap { |ts| ts.shift(@steps_offset) if @steps_offset > 0 }
-      .map { |t| ((num_train_timesteps - 1).to_f / (num_inference_steps - 1) * t).round }
-      .reverse
+    case timestep_spacing
+    when "linspace"
+      linspace_timesteps
+    else
+      leading_timesteps
+    end
   end
 
   def scale_model_input(input, timestep: 0)
@@ -103,13 +99,39 @@ class DDIMScheduler
         .tap { |a| a[-1] = 1.0 if @set_alpha_to_one }
     end
 
-    def initialize_alphas_cumprod
-      @alphas_cumprod = Torch.cumprod(Torch.tensor(alphas), dim: 0)
-    end
-
     def scaled_linear_beta_schedule(beta_start, beta_end, num_train_timesteps)
       (0...num_train_timesteps).map do |t|
         beta_start + t * (beta_end - beta_start) / (num_train_timesteps - 1)
       end
+    end
+
+    def initialize_alphas_cumprod
+      @alphas_cumprod = Torch.cumprod(Torch.tensor(alphas), dim: 0)
+    end
+
+    def leading_timesteps
+      step = num_train_timesteps / num_inference_steps
+      Torch.arange(0, num_train_timesteps, step)
+        .round
+        .flip(dims: [0])
+        .then { |t| t + steps_offset.to_i }
+        .map(&:to_i)
+    end
+
+    def linspace_timesteps
+      Torch.linspace(0, num_train_timesteps.pred, num_inference_steps)
+        .round
+        .flip(dims: [0])
+        .then { |t| t + steps_offset.to_i }
+        .clip(0, num_train_timesteps.pred)
+        .map(&:to_i)
+    end
+
+    def native_linspace_timesteps
+      (0...num_inference_steps)
+        .to_a
+        .tap { |ts| ts.shift(@steps_offset) if @steps_offset > 0 }
+        .map { |t| ((num_train_timesteps - 1).to_f / (num_inference_steps - 1) * t).round }
+        .reverse
     end
 end

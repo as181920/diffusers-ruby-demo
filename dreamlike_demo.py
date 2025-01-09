@@ -28,7 +28,7 @@ unet = UNet2DConditionModel.from_pretrained(
 
 from diffusers import UniPCMultistepScheduler
 
-scheduler = UniPCMultistepScheduler.from_pretrained(
+scheduler = DDIMScheduler.from_pretrained(
         "dreamlike-art/dreamlike-photoreal-2.0",
         subfolder="scheduler"
         )

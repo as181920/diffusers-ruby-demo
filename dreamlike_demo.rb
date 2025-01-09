@@ -5,12 +5,8 @@ require "tokenizers"
 require "debug"
 require_relative "./ddim_scheduler"
 
-providers = if Torch::CUDA.available?
-              %w[CUDAExecutionProvider]
-            else
-              %w[CPUExecutionProvider]
-            end
-device = "cpu" # use "cuda" with gpu, currently use cpu temporarily to handle gpu runtime error
+device = Torch::CUDA.available? ? ENV.fetch("DEVICE", "cuda") : "cpu"
+providers = device == "cuda" ? %w[CUDAExecutionProvider] : %w[CPUExecutionProvider]
 
 # model:
 # https://huggingface.co/docs/diffusers/tutorials/autopipeline
@@ -23,7 +19,7 @@ prompt = ["godzilla is watching kitty doing homework"]
 batch_size = prompt.length
 
 # Create text tokens
-tokenizer = Tokenizers.from_pretrained("openai/clip-vit-base-patch32")
+tokenizer = Tokenizers.from_pretrained("openai/clip-vit-large-patch14") # openai/clip-vit-base-patch32
 tokenizer.enable_padding(length: 77, pad_id: 49407)
 tokenizer.enable_truncation(77)
 text_tokens = tokenizer.encode_batch(prompt)
@@ -58,13 +54,13 @@ generator = Torch::Generator.new.manual_seed(0) # Seed generator to create the i
 latents = Torch.randn([batch_size, channels_num, height / 8, width / 8], generator:, device:) # Shape: 1x4x64x64
 
 # Set scheduler
-scheduler = DDIMScheduler.new
+scheduler = DDIMScheduler.new(steps_offset: 1, timestep_spacing: "leading")
 latents = latents * scheduler.init_noise_sigma # Scaling the input with the initial noise distribution, sigma
 num_inference_steps = 25 # denoising steps
 scheduler.num_inference_steps = num_inference_steps
 
 # Denoise the image
-guidance_scale = 7.5 # classifier-free guidance
+guidance_scale = 7.5 # classifier-free guidance, determines how much weight should be given to the prompt when generating an image.
 scheduler.timesteps.each do |timestep|
   print "scheduler timestep #{timestep} started at #{Time.now.strftime('%F %T')}\n"
   # expand the latents if we are doing classifier-free guidance to avoid doing two forward passes.
@@ -103,21 +99,16 @@ end
 
 # Step 1: (image / 2 + 0.5).clamp(0, 1)
 image = ((image / 2.0) + 0.5).clip(0, 1)
-
 # Step 2: 去除批次维度（假设 image 是 4D 张量）
 # image = image[0, true, true, true] if image.ndim == 4
 image = image[0] if image.ndim == 4
-
 # Step 3: 调整维度顺序，从 (C, H, W) 到 (H, W, C)
 image = image.permute(1, 2, 0)
-
 # Step 4: 转换到 uint8 并放大到 [0, 255]
 image = (image * 255).round
-
 # Step 5: 将数组转换为 PNG 图像并保存
 output_height, output_width, _channels = image.shape
 png = ChunkyPNG::Image.new(output_width, output_height)
-
 height.times do |y|
   width.times do |x|
     r, g, b = image[y, x, 0..2].map(&:to_i) # 取 RGB 值
