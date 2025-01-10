@@ -7,9 +7,9 @@ class PNDMScheduler
     :prediction_type,
     :clip_sample, :set_alpha_to_one,
     :skip_prk_steps, :steps_offset, :trained_betas,
-    :init_noise_sigma
+    :init_noise_sigma, :final_alpha_cumprod, :prk_timesteps
 
-  attr_accessor :num_inference_steps, :ets, :counter
+  attr_accessor :num_inference_steps, :ets, :counter, :cur_sample, :cur_model_output
 
   def initialize(
     beta_schedule: "scaled_linear",
@@ -21,10 +21,11 @@ class PNDMScheduler
     prediction_type: "epsilon",
     clip_sample: false,
     set_alpha_to_one: false,
-    skip_prk_steps: true,
+    skip_prk_steps: false,
     steps_offset: 0,
     trained_betas: nil,
-    ets: []
+    ets: [],
+    counter: 0
   )
     # 从配置初始化参数
     @beta_schedule = beta_schedule
@@ -40,12 +41,17 @@ class PNDMScheduler
     @steps_offset = steps_offset
     @trained_betas = trained_betas
     @init_noise_sigma = 1.0
+    @prk_timesteps = []
+    @cur_model_output = 0.0
+    @cur_sample = nil
     @ets = ets
-    @counter = 0
+    @counter = counter
 
     # 初始化 betas 和 alphas_cumprod
     initialize_betas_and_alphas
     compute_alphas_cumprod
+
+    @final_alpha_cumprod = set_alpha_to_one ? torch.tensor(1.0) : alphas_cumprod[0]
   end
 
   def timesteps
@@ -62,7 +68,7 @@ class PNDMScheduler
   end
 
   def step(model_output, timestep, sample)
-    if ets.size < 4
+    if (counter < prk_timesteps.length) && !skip_prk_steps
       step_prk(model_output, timestep, sample)
     else
       step_plms(model_output, timestep, sample)
@@ -70,56 +76,61 @@ class PNDMScheduler
   end
 
   def step_prk(model_output, timestep, sample)
-    @ets << model_output
-    alpha_t = Math.cos(timestep * Math::PI / 2)
-    beta_t = 1 - alpha_t
+    diff_to_prev = counter % 2 ? 0 : num_train_timesteps / num_inference_steps / 2
+    prev_timestep = timestep - diff_to_prev
+    timestep = prk_timesteps[counter / 4 * 4]
 
-    updated_sample = sample - (Torch.tensor(beta_t) * model_output)
-
-    if @ets.size == 4 # Once 4 ets are gathered, use PLMS directly in the next step
-      @counter += 1
-      @ets.shift
+    if counter % 4 == 0
+      @cur_model_output += model_output / 6.0
+      @ets.append(model_output)
+      @cur_sample = sample
+    elsif (counter - 1) % 4 == 0
+      @cur_model_output += model_output / 3.0
+    elsif (counter - 2) % 4 == 0
+      @cur_model_output += model_output / 3.0
+    elsif (counter - 3) % 4 == 0
+      model_output = cur_model_output + model_output / 6.0
+      @cur_model_output = 0
     end
 
-    { prev_sample: updated_sample }
+    cur_sample = cur_sample.nil? ? sample : cur_sample
+    prev_sample = get_prev_sample(cur_sample, timestep, prev_timestep, model_output)
+    @counter += 1
+
+    { prev_sample: }
   end
 
   def step_plms(model_output, timestep, sample)
-    @ets << model_output
-    @ets.shift if @ets.size > 4
+    prev_timestep = timestep - num_train_timesteps / num_inference_steps
 
-    a, b, c, d = [0.5, -1.0, 1.5, -0.5].map { |f| Torch.tensor(f) } # Coefficients for PLMS
-    combined_eta = (a * @ets[-4]) + (b * @ets[-3]) + (c * @ets[-2]) + (d * @ets[-1])
-
-    alpha_t = Math.cos(timestep * Math::PI / 2)
-    beta_t = 1 - alpha_t
-
-    updated_sample = sample - (Torch.tensor(beta_t) * combined_eta)
-    { prev_sample: updated_sample }
-  end
-
-  def step_deprecated(model_output, timestep, sample)
-    # 当前 alpha_cumprod 和 beta_t
-    alpha_cumprod_t = alphas_cumprod[timestep]
-    alpha_cumprod_prev = timestep > 0 ? alphas_cumprod[timestep - 1] : Torch.tensor(1.0)
-    # beta_t = betas[timestep]
-
-    # 根据 prediction_type 计算 x_0
-    case prediction_type
-    when "epsilon"
-      pred_original_sample = (sample - Torch.sqrt(Torch.tensor(1.0) - alpha_cumprod_t) * model_output) / Torch.sqrt(alpha_cumprod_t)
+    if counter != 1
+      @ets = @ets.last(3)
+      @ets.append(model_output)
     else
-      raise NotImplementedError, "Prediction type #{prediction_type} not implemented."
+        prev_timestep = timestep
+        timestep = timestep + num_train_timesteps / num_inference_steps
     end
 
-    # Clip x_0 if clip_sample is true
-    pred_original_sample = pred_original_sample.map { |v| v.clamp(-1.0, 1.0) } if clip_sample
+    if (ets.length == 1) && (counter == 0)
+        model_output = model_output
+        @cur_sample = sample
+    elsif (ets.length == 1) && (counter == 1)
+      model_output = (model_output + ets[-1]) / 2.0
+      sample = cur_sample
+      @cur_sample = nil
+    elsif ets.length == 2
+      model_output = (3 * ets[-1] - ets[-2]) / 2.0
+    elsif ets.length == 3
+      model_output = (23 * ets[-1] - 16 * ets[-2] + 5 * ets[-3]) / 12.0
+    else
+      model_output = (55 * ets[-1] - 59 * ets[-2] + 37 * ets[-3] - 9 * ets[-4]) / 24.0
+    end
 
-    # 计算下一个时间步的样本
-    sample_predicted = Torch.sqrt(alpha_cumprod_prev) * pred_original_sample +
-      Torch.sqrt(Torch.tensor(1.0) - alpha_cumprod_prev) * model_output
+    prev_sample = get_prev_sample(sample, timestep, prev_timestep, model_output)
+    @counter += 1
 
-    { prev_sample: sample_predicted }
+    puts prev_sample
+    { prev_sample: }
   end
 
   private
@@ -160,6 +171,28 @@ class PNDMScheduler
         .then { |t| t + steps_offset.to_i }
         .clip(0, num_train_timesteps.pred)
         .map(&:to_i)
+    end
+
+    def get_prev_sample(sample, timestep, prev_timestep, model_output)
+      alpha_prod_t = alphas_cumprod[timestep]
+      alpha_prod_t_prev = prev_timestep >= 0 ? alphas_cumprod[prev_timestep] : final_alpha_cumprod
+      beta_prod_t = 1 - alpha_prod_t
+      beta_prod_t_prev = 1 - alpha_prod_t_prev
+
+      if prediction_type == "v_prediction"
+        model_output = (alpha_prod_t**0.5) * model_output + (beta_prod_t**0.5) * sample
+      elsif prediction_type != "epsilon"
+        raise "prediction_type must be one of epsilon or v_prediction"
+      end
+
+      sample_coeff = (alpha_prod_t_prev / alpha_prod_t) ** 0.5
+      model_output_denom_coeff = alpha_prod_t * beta_prod_t_prev ** 0.5 + (alpha_prod_t * beta_prod_t * alpha_prod_t_prev) ** 0.5
+
+      prev_sample = (
+          sample_coeff * sample - (alpha_prod_t_prev - alpha_prod_t) * model_output / model_output_denom_coeff
+      )
+
+      prev_sample
     end
 
     def _add_noise(original_sample, noise, timestep)

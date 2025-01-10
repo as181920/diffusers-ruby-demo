@@ -1,9 +1,16 @@
 import sys
+from pathlib import Path
 from PIL import Image
 import torch
 from transformers import CLIPTextModel, CLIPTokenizer
-from diffusers import AutoencoderKL, UNet2DConditionModel, PNDMScheduler
 from tqdm.auto import tqdm
+
+from diffusers import AutoencoderKL, UNet2DConditionModel, PNDMScheduler
+
+# sys.path.append(str(Path(__file__).resolve().parent))
+# from local_diffusers.src.diffusers.models.autoencoders.autoencoder_kl import AutoencoderKL
+# from local_diffusers.src.diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
+# from local_diffusers.src.diffusers.schedulers.scheduling_pndm import PNDMScheduler
 
 vae = AutoencoderKL.from_pretrained(
         "stable-diffusion-v1-5/stable-diffusion-v1-5",
@@ -39,7 +46,7 @@ vae.to(torch_device)
 text_encoder.to(torch_device)
 unet.to(torch_device)
 
-prompt = ["godzilla is watching kitty doing homework"]
+prompt = ["The godzilla is watching hello kitty doing her homework, they get along harmonious"]
 height = 512  # default height of Stable Diffusion
 width = 512  # default width of Stable Diffusion
 num_inference_steps = 25  # Number of denoising steps
@@ -108,4 +115,4 @@ with torch.no_grad():
 image = (image / 2 + 0.5).clamp(0, 1).squeeze()
 image = (image.permute(1, 2, 0) * 255).to(torch.uint8).cpu().numpy()
 image = Image.fromarray(image)
-image.save("./output.png")
+image.save("./output-py.png")

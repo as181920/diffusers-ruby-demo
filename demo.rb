@@ -26,7 +26,7 @@ unet = OnnxRuntime::Model.new("./onnx/unet/model.onnx", providers: PROVIDERS)
 vae_decoder = OnnxRuntime::Model.new("./onnx/vae_decoder/model.onnx", providers: PROVIDERS)
 
 # Create text tokens
-prompt = ["godzilla is watching kitty doing homework"]
+prompt = ["The godzilla is watching hello kitty doing her homework, they get along harmonious"]
 batch_size = prompt.length
 
 # Create text tokens
@@ -135,4 +135,4 @@ height.times do |y|
 end
 
 # 保存图像
-png.save("./output.png")
+png.save("./output-rb.png")

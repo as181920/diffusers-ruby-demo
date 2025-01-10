@@ -1,3 +1,4 @@
+/local_diffusers/
 /onnx/*
 !/onnx/.keep
 output*.png
