@@ -1,4 +1,5 @@
 require "chunky_png"
+require "logger"
 require "torch-rb"
 require "onnxruntime"
 require "tokenizers"
@@ -15,6 +16,8 @@ else
   DEVICE = "cpu".freeze
   PROVIDERS = %w[CPUExecutionProvider].freeze
 end
+
+logger = Logger.new STDOUT, level: ENV.fetch("LOG_LEVEL", :info)
 
 # run steps:
 # https://huggingface.co/docs/diffusers/using-diffusers/write_own_pipeline#deconstruct-the-stable-diffusion-pipeline
@@ -35,7 +38,8 @@ tokenizer.enable_padding(length: 77, pad_id: 49407)
 tokenizer.enable_truncation(77)
 text_tokens = tokenizer.encode_batch(prompt)
 text_ids = Torch.tensor(text_tokens.map(&:ids))
-puts "text_tokens(#{text_ids.shape}):\n", text_ids
+logger.debug "text_tokens(#{text_ids.shape}):"
+logger.debug text_ids
 
 # Create text embeddings
 text_embeddings = Torch.no_grad do
@@ -43,7 +47,8 @@ text_embeddings = Torch.no_grad do
     .predict({ input_ids: text_ids }) # Shape: 1x77
     .then { |h| Torch.tensor(h["last_hidden_state"]) } # Shape: 1x77x768
 end
-puts "text_embeddings(#{text_embeddings.shape}):\n", text_embeddings
+logger.debug "text_embeddings(#{text_embeddings.shape}):"
+logger.debug text_embeddings
 
 # Generate the unconditional text embeddings which are the embeddings for the padding token.
 # max_length = text_ids.shape[-1] # 77
@@ -53,10 +58,12 @@ uncond_embeddings = text_encoder
   .predict({ input_ids: uncond_ids })
   .then { |h| Torch.tensor(h["last_hidden_state"]) } # Shape: 1x77x768
 
-puts "uncond_embeddings(#{uncond_embeddings.shape}):\n", uncond_embeddings
+logger.debug "uncond_embeddings(#{uncond_embeddings.shape}):"
+logger.debug uncond_embeddings
 
 text_embeddings = Torch.cat([uncond_embeddings, text_embeddings])
-puts "conditional and unconditional embeddings(#{text_embeddings.shape}):\n", text_embeddings
+logger.debug "conditional and unconditional embeddings(#{text_embeddings.shape}):"
+logger.debug text_embeddings
 
 # Create random noise
 height = 512
@@ -65,7 +72,8 @@ channels_num = unet.inputs.detect{ |e| e[:name] == "sample" }[:shape][1]
 generator = Torch::Generator.new.manual_seed(0) # Seed generator to create the initial latent noise
 Torch.manual_seed(0)
 latents = Torch.randn([batch_size, channels_num, height / 8, width / 8], generator:, device: DEVICE) # Shape: 1x4x64x64
-puts "random noise latents(#{latents.shape}):\n", latents
+logger.debug "random noise latents(#{latents.shape}):"
+logger.debug latents
 
 # Set scheduler
 # scheduler = DDIMScheduler.new(steps_offset: 1, timestep_spacing: "leading")
@@ -77,13 +85,14 @@ scheduler.num_inference_steps = num_inference_steps
 # Denoise the image
 guidance_scale = 7.5 # classifier-free guidance, determines how much weight should be given to the prompt when generating an image.
 
-print "scheduler timesteps:", scheduler.timesteps, "\n"
+logger.debug "scheduler timesteps: #{scheduler.timesteps}"
 scheduler.timesteps.each do |timestep|
-  puts "scheduler timestep #{timestep} started at #{Time.now.strftime('%F %T')}"
+  logger.info "scheduler timestep #{timestep} started at #{Time.now.strftime('%F %T')}"
   # expand the latents if we are doing classifier-free guidance to avoid doing two forward passes.
   latent_model_input = Torch.cat([latents] * 2)
     .then { |input| scheduler.scale_model_input(input, timestep:) }
-  puts "timestep #{timestep} latent_model_input(#{latent_model_input.shape}):", latent_model_input
+  logger.debug "timestep #{timestep} latent_model_input(#{latent_model_input.shape}):"
+  logger.debug latent_model_input
 
   # predict the noise residual
   noise_pred = Torch.no_grad do
@@ -91,16 +100,19 @@ scheduler.timesteps.each do |timestep|
       .predict({ sample: latent_model_input, timestep: Torch.tensor(timestep), encoder_hidden_states: text_embeddings })
       .then { |h| Torch.tensor(h["out_sample"]) } # Shape: 2x4x64x64
   end
-  puts "timestep #{timestep} noise_pred(#{noise_pred.shape}):", noise_pred
+  logger.debug "timestep #{timestep} noise_pred(#{noise_pred.shape}):"
+  logger.debug noise_pred
 
   # Perform guidance
   noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
   noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
-  puts "timestep #{timestep} noise_pred after guidance(#{noise_pred.shape}):", noise_pred
+  logger.debug "timestep #{timestep} noise_pred after guidance(#{noise_pred.shape}):"
+  logger.debug noise_pred
 
   # Compute the previous noisy sample x_t -> x_t-1
   latents = scheduler.step(noise_pred, timestep, latents)[:prev_sample]
-  puts "timestep #{timestep} previous noisy latents(#{latents.shape}):", latents
+  logger.debug "timestep #{timestep} previous noisy latents(#{latents.shape}):"
+  logger.debug latents
 end
 
 # Decode the image
